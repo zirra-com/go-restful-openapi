@@ -149,12 +149,7 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 	}
 
 	if param.Kind == restful.BodyParameterKind && r.ReadSample != nil && param.DataType == reflect.TypeOf(r.ReadSample).String() {
-		p.Schema = new(spec.Schema)
-		if param.DataType == "string" {
-			p.Schema.Type = []string{"string"}
-		} else {
-			p.Schema.Ref = spec.MustCreateRef("#/definitions/" + param.DataType)
-		}
+		p.Schema = buildSchema(reflect.TypeOf(r.ReadSample))
 		p.SimpleSchema = spec.SimpleSchema{}
 	} else {
 		p.Type = param.DataType

@@ -210,6 +210,14 @@ func (b definitionBuilder) buildProperty(field reflect.StructField, model *spec.
 		return jsonName, modelDescription, prop
 	}
 
+	fieldKindName := fieldKind.String()
+	if b.isPrimitiveType(fieldKindName) {
+		mapped := b.jsonSchemaType(fieldKindName)
+		prop.Type = []string{mapped}
+		prop.Format = b.jsonSchemaFormat(fieldKindName)
+		return jsonName, modelDescription, prop
+	}
+
 	fieldTypeName := b.keyFrom(fieldType)
 	if b.isPrimitiveType(fieldTypeName) {
 		mapped := b.jsonSchemaType(fieldTypeName)

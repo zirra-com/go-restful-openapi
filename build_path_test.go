@@ -9,6 +9,7 @@ import (
 
 func TestRouteToPath(t *testing.T) {
 	description := "get the <strong>a</strong> <em>b</em> test\nthis is the test description"
+	notes := "notes\nblah blah"
 
 	ws := new(restful.WebService)
 	ws.Path("/tests/{v}")
@@ -17,16 +18,17 @@ func TestRouteToPath(t *testing.T) {
 	ws.Produces(restful.MIME_XML)
 	ws.Route(ws.GET("/a/{b}").To(dummy).
 		Doc(description).
+		Notes(notes).
 		Param(ws.PathParameter("b", "value of b").DefaultValue("default-b")).
 		Param(ws.QueryParameter("q", "value of q").DefaultValue("default-q")).
 		Returns(200, "list of a b tests", []Sample{}).
 		Writes([]Sample{}))
 	ws.Route(ws.GET("/a/{b}/{c:[a-z]+}/{d:[1-9]+}/e").To(dummy).
-		Doc("get the a b test").
 		Param(ws.PathParameter("b", "value of b").DefaultValue("default-b")).
 		Param(ws.PathParameter("c", "with regex").DefaultValue("abc")).
 		Param(ws.PathParameter("d", "with regex").DefaultValue("abcef")).
-		Param(ws.QueryParameter("q", "value of q").DefaultValue("default-q")).
+		Param(ws.QueryParameter("q", "value of q").DataType("string").DataFormat("date").
+			DefaultValue("default-q").AllowMultiple(true)).
 		Returns(200, "list of a b tests", []Sample{}).
 		Writes([]Sample{}))
 
@@ -40,10 +42,18 @@ func TestRouteToPath(t *testing.T) {
 		t.Error("Expected path to exist after it was sanitized.")
 	}
 
-	if p.Paths["/tests/{v}/a/{b}"].Get.Description != description {
+	q, exists := getParameter(p.Paths["/tests/{v}/a/{b}/{c}/{d}/e"], "q")
+	if !exists {
+		t.Errorf("get parameter q failed")
+	}
+	if q.Type != "array" || q.Items.Type != "string" || q.Format != "date" {
+		t.Errorf("parameter q expected to be a date array")
+	}
+
+	if p.Paths["/tests/{v}/a/{b}"].Get.Description != notes {
 		t.Errorf("GET description incorrect")
 	}
-	if p.Paths["/tests/{v}/a/{b}"].Get.Summary != "get the a b test" {
+	if p.Paths["/tests/{v}/a/{b}"].Get.Summary != "get the a b test\nthis is the test description" {
 		t.Errorf("GET summary incorrect")
 	}
 	response := p.Paths["/tests/{v}/a/{b}"].Get.Responses.StatusCodeResponses[200]
@@ -73,10 +83,10 @@ func getParameter(path spec.PathItem, name string) (*spec.Parameter, bool) {
 func checkPattern(t *testing.T, path spec.PathItem, paramName string, pattern string) {
 	param, exists := getParameter(path, paramName)
 	if !exists {
-		t.Error("Expected Parameter %s to exist", paramName)
+		t.Errorf("Expected Parameter %s to exist", paramName)
 	}
 	if param.Pattern != pattern {
-		t.Error("Expected pattern %s to equal %s", param.Pattern, pattern)
+		t.Errorf("Expected pattern %s to equal %s", param.Pattern, pattern)
 	}
 }
 
@@ -99,11 +109,11 @@ func TestMultipleMethodsRouteToPath(t *testing.T) {
 	p := buildPaths(ws, Config{})
 	t.Log(asJSON(p))
 
-	if p.Paths["/tests/a/a/b"].Get.Description != "get a b test" {
-		t.Errorf("GET description incorrect")
+	if p.Paths["/tests/a/a/b"].Get.Summary != "get a b test" {
+		t.Errorf("GET summary incorrect")
 	}
-	if p.Paths["/tests/a/a/b"].Post.Description != "post a b test" {
-		t.Errorf("POST description incorrect")
+	if p.Paths["/tests/a/a/b"].Post.Summary != "post a b test" {
+		t.Errorf("POST summary incorrect")
 	}
 	if _, exists := p.Paths["/tests/a/a/b"].Post.Responses.StatusCodeResponses[500]; !exists {
 		t.Errorf("Response code 500 not added to spec.")
@@ -118,5 +128,107 @@ func TestMultipleMethodsRouteToPath(t *testing.T) {
 
 	if postBodyparam.Format != "" || postBodyparam.Type != "" || postBodyparam.Default != nil {
 		t.Errorf("Invalid parameter property is set on body property")
+	}
+}
+
+func TestReadArrayObjectInBody(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/tests/a")
+	ws.Consumes(restful.MIME_JSON)
+	ws.Produces(restful.MIME_XML)
+
+	ws.Route(ws.POST("/a/b").To(dummy).
+		Doc("post a b test with array in body").
+		Returns(200, "list of a b tests", []Sample{}).
+		Returns(500, "internal server error", []Sample{}).
+		Reads([]Sample{}).
+		Writes([]Sample{}))
+
+	p := buildPaths(ws, Config{})
+	t.Log(asJSON(p))
+
+	postInfo := p.Paths["/tests/a/a/b"].Post
+
+	if postInfo.Summary != "post a b test with array in body" {
+		t.Errorf("POST description incorrect")
+	}
+	if _, exists := postInfo.Responses.StatusCodeResponses[500]; !exists {
+		t.Errorf("Response code 500 not added to spec.")
+	}
+	// indentify  element model type in body array
+	expectedItemRef := spec.MustCreateRef("#/definitions/restfulspec.Sample")
+	postBody := postInfo.Parameters[0]
+	if postBody.Schema.Ref.String() != "" {
+		t.Errorf("you shouldn't have body Ref setting when using array in body!")
+	}
+	// check body array dy item ref
+	postBodyitems := postBody.Schema.Items.Schema.Ref
+	if postBodyitems.String() != expectedItemRef.String() {
+		t.Errorf("Expected: %s, Got: %s", expectedItemRef.String(), expectedItemRef.String())
+	}
+
+	if postBody.Format != "" || postBody.Type != "" || postBody.Default != nil {
+		t.Errorf("Invalid parameter property is set on body property")
+	}
+}
+
+// TestWritesPrimitive ensures that if an operation returns a primitive, then it
+// is used as such (and not a ref to a definition).
+func TestWritesPrimitive(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/tests/returns")
+	ws.Consumes(restful.MIME_JSON)
+	ws.Produces(restful.MIME_JSON)
+
+	ws.Route(ws.POST("/primitive").To(dummy).
+		Doc("post that returns a string").
+		Returns(200, "primitive string", "(this is a string)").
+		Writes("(this is a string)"))
+
+	ws.Route(ws.POST("/custom").To(dummy).
+		Doc("post that returns a custom structure").
+		Returns(200, "sample object", Sample{}).
+		Writes(Sample{}))
+
+	p := buildPaths(ws, Config{})
+	t.Log(asJSON(p))
+
+	// Make sure that the operation that returns a primitive type is correct.
+	if pathInfo, okay := p.Paths["/tests/returns/primitive"]; !okay {
+		t.Errorf("Could not find path")
+	} else {
+		postInfo := pathInfo.Post
+
+		if postInfo.Summary != "post that returns a string" {
+			t.Errorf("POST description incorrect")
+		}
+		response := postInfo.Responses.StatusCodeResponses[200]
+		if response.Schema.Ref.String() != "" {
+			t.Errorf("Expected no ref; got: %s", response.Schema.Ref.String())
+		}
+		if len(response.Schema.Type) != 1 {
+			t.Errorf("Expected exactly one type; got: %d", len(response.Schema.Type))
+		}
+		if response.Schema.Type[0] != "string" {
+			t.Errorf("Expected a type of string; got: %s", response.Schema.Type[0])
+		}
+	}
+
+	// Make sure that the operation that returns a custom type is correct.
+	if pathInfo, okay := p.Paths["/tests/returns/custom"]; !okay {
+		t.Errorf("Could not find path")
+	} else {
+		postInfo := pathInfo.Post
+
+		if postInfo.Summary != "post that returns a custom structure" {
+			t.Errorf("POST description incorrect")
+		}
+		response := postInfo.Responses.StatusCodeResponses[200]
+		if response.Schema.Ref.String() != "#/definitions/restfulspec.Sample" {
+			t.Errorf("Expected ref '#/definitions/restfulspec.Sample'; got: %s", response.Schema.Ref.String())
+		}
+		if len(response.Schema.Type) != 0 {
+			t.Errorf("Expected exactly zero types; got: %d", len(response.Schema.Type))
+		}
 	}
 }

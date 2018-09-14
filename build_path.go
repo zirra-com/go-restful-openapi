@@ -74,11 +74,8 @@ func buildPathItem(ws *restful.WebService, r restful.Route, existingPathItem spe
 
 func buildOperation(ws *restful.WebService, r restful.Route, patterns map[string]string, cfg Config) *spec.Operation {
 	o := spec.NewOperation(r.Operation)
-	o.Description = r.Doc
-	// take the first line (stripping HTML tags) to be the summary
-	if lines := strings.Split(r.Doc, "\n"); len(lines) > 0 {
-		o.Summary = stripTags(lines[0])
-	}
+	o.Description = r.Notes
+	o.Summary = stripTags(r.Doc)
 	o.Consumes = r.Consumes
 	o.Produces = r.Produces
 	o.Deprecated = r.Deprecated
@@ -132,14 +129,6 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 	p := spec.Parameter{}
 	param := restfulParam.Data()
 	p.In = asParamType(param.Kind)
-	if param.AllowMultiple {
-		p.Type = "array"
-		p.Items = spec.NewItems()
-		p.Items.Type = param.DataType
-		p.CollectionFormat = param.CollectionFormat
-	} else {
-		p.Type = param.DataType
-	}
 	p.Description = param.Description
 	p.Name = param.Name
 	p.Required = param.Required
@@ -147,12 +136,37 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 	if param.Kind == restful.PathParameterKind {
 		p.Pattern = pattern
 	}
-
-	if param.Kind == restful.BodyParameterKind && r.ReadSample != nil && param.DataType == reflect.TypeOf(r.ReadSample).String() {
-		p.Schema = buildSchema(reflect.TypeOf(r.ReadSample))
+	st := reflect.TypeOf(r.ReadSample)
+	if param.Kind == restful.BodyParameterKind && r.ReadSample != nil && param.DataType == st.String() {
+		p.Schema = new(spec.Schema)
 		p.SimpleSchema = spec.SimpleSchema{}
+		if st.Kind() == reflect.Array || st.Kind() == reflect.Slice {
+			dataTypeName := keyFrom(st.Elem(), cfg)
+			p.Schema.Type = []string{"array"}
+			p.Schema.Items = &spec.SchemaOrArray{
+				Schema: &spec.Schema{},
+			}
+			isPrimitive := isPrimitiveType(dataTypeName)
+			if isPrimitive {
+				mapped := jsonSchemaType(dataTypeName)
+				p.Schema.Items.Schema.Type = []string{mapped}
+			} else {
+				p.Schema.Items.Schema.Ref = spec.MustCreateRef("#/definitions/" + dataTypeName)
+			}
+		} else {
+			dataTypeName := keyFrom(st, cfg)
+			p.Schema.Ref = spec.MustCreateRef("#/definitions/" + dataTypeName)
+		}
+
 	} else {
-		p.Type = param.DataType
+		if param.AllowMultiple {
+			p.Type = "array"
+			p.Items = spec.NewItems()
+			p.Items.Type = param.DataType
+			p.CollectionFormat = param.CollectionFormat
+		} else {
+			p.Type = param.DataType
+		}
 		p.Default = stringAutoType(param.DefaultValue)
 		p.Format = param.DataFormat
 	}
@@ -176,19 +190,30 @@ func buildSchema(st reflect.Type) *spec.Schema {
 		schema.Items = &spec.SchemaOrArray{
 			Schema: &spec.Schema{},
 		}
-
-		schema.Items.Schema = buildSchema(st.Elem())
-	} else if st.Kind() == reflect.Map {
-		if st.Elem().Kind() == reflect.Interface {
-			schema.Type = []string{"object"}
-		} else {
-			schema.Type = []string{st.Key().Kind().String()}
-			additionalProperties := &spec.SchemaOrBool{
+		r.Schema = new(spec.Schema)
+		if st.Kind() == reflect.Array || st.Kind() == reflect.Slice {
+			modelName := keyFrom(st.Elem(), cfg)
+			r.Schema.Type = []string{"array"}
+			r.Schema.Items = &spec.SchemaOrArray{
 				Schema: &spec.Schema{},
 			}
-			schema.AdditionalProperties = additionalProperties
-
-			schema.AdditionalProperties.Schema = buildSchema(st.Elem())
+			isPrimitive := isPrimitiveType(modelName)
+			if isPrimitive {
+				mapped := jsonSchemaType(modelName)
+				r.Schema.Items.Schema.Type = []string{mapped}
+			} else {
+				r.Schema.Items.Schema.Ref = spec.MustCreateRef("#/definitions/" + modelName)
+			}
+		} else {
+			modelName := keyFrom(st, cfg)
+			if isPrimitiveType(modelName) {
+				// If the response is a primitive type, then don't reference any definitions.
+				// Instead, set the schema's "type" to the model name.
+				r.Schema.AddType(modelName, "")
+			} else {
+				modelName := keyFrom(st, cfg)
+				r.Schema.Ref = spec.MustCreateRef("#/definitions/" + modelName)
+			}
 		}
 	} else {
 		modelName := definitionBuilder{}.keyFrom(st)

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	restful "github.com/emicklei/go-restful"
+	"github.com/emicklei/go-restful"
 	"github.com/go-openapi/spec"
 )
 
@@ -146,7 +146,7 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 
 	st := reflect.TypeOf(r.ReadSample)
 	if param.Kind == restful.BodyParameterKind && r.ReadSample != nil && param.DataType == st.String() {
-		p.Schema = new(spec.Schema)
+		p.Schema = buildSchema(st, cfg)
 
 		p.SimpleSchema = spec.SimpleSchema{}
 		if st.Kind() == reflect.Array || st.Kind() == reflect.Slice {
@@ -183,40 +183,53 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 	return p
 }
 
+func buildSchema(st reflect.Type, cfg Config) (schema *spec.Schema) {
+	if st.Kind() == reflect.Ptr {
+		// For pointer type, use element type as the key; otherwise we'll
+		// endup with '#/definitions/*Type' which violates openapi spec.
+		st = st.Elem()
+
+		return buildSchema(st, cfg)
+	}
+
+	schema = new(spec.Schema)
+
+	if isPrimitiveType(st.Kind().String()) {
+		// If the response is a primitive type, then don't reference any definitions.
+		// Instead, set the schema's "type" to the model name.
+
+		mapped := jsonSchemaType(st.String())
+		schema.Type = []string{mapped}
+	} else if st.Kind() == reflect.Array || st.Kind() == reflect.Slice {
+		schema.Type = []string{"array"}
+		schema.Items = &spec.SchemaOrArray{
+			Schema: &spec.Schema{},
+		}
+
+		schema.Items.Schema = buildSchema(st.Elem(), cfg)
+	} else if st.Kind() == reflect.Map {
+		if st.Elem().Kind() == reflect.Interface {
+			schema.Type = []string{"object"}
+		} else {
+			schema.Type = []string{st.Key().Kind().String()}
+			schema.AdditionalProperties = &spec.SchemaOrBool{
+				Schema: &spec.Schema{},
+			}
+
+			schema.AdditionalProperties.Schema = buildSchema(st.Elem(), cfg)
+		}
+	} else {
+		modelName := keyFrom(st, cfg)
+		schema.Ref = spec.MustCreateRef("#/definitions/" + modelName)
+	}
+
+	return
+}
+
 func buildResponse(e restful.ResponseError, cfg Config) (r spec.Response) {
 	r.Description = e.Message
 	if e.Model != nil {
-		st := reflect.TypeOf(e.Model)
-		if st.Kind() == reflect.Ptr {
-			// For pointer type, use element type as the key; otherwise we'll
-			// endup with '#/definitions/*Type' which violates openapi spec.
-			st = st.Elem()
-		}
-		r.Schema = new(spec.Schema)
-		if st.Kind() == reflect.Array || st.Kind() == reflect.Slice {
-			modelName := keyFrom(st.Elem(), cfg)
-			r.Schema.Type = []string{"array"}
-			r.Schema.Items = &spec.SchemaOrArray{
-				Schema: &spec.Schema{},
-			}
-			isPrimitive := isPrimitiveType(modelName)
-			if isPrimitive {
-				mapped := jsonSchemaType(modelName)
-				r.Schema.Items.Schema.Type = []string{mapped}
-			} else {
-				r.Schema.Items.Schema.Ref = spec.MustCreateRef("#/definitions/" + modelName)
-			}
-		} else {
-			modelName := keyFrom(st, cfg)
-			if isPrimitiveType(modelName) {
-				// If the response is a primitive type, then don't reference any definitions.
-				// Instead, set the schema's "type" to the model name.
-				r.Schema.AddType(modelName, "")
-			} else {
-				modelName := keyFrom(st, cfg)
-				r.Schema.Ref = spec.MustCreateRef("#/definitions/" + modelName)
-			}
-		}
+		r.Schema = buildSchema(reflect.TypeOf(e.Model), cfg)
 	}
 	return r
 }
